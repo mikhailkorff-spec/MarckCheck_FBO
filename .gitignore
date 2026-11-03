@@ -1,0 +1,13 @@
+# Артефакты сборки
+bin/
+obj/
+publish/
+# Локальные данные и база
+data/
+*.db
+*.db-shm
+*.db-wal
+# IDE
+.vs/
+.vscode/
+*.user

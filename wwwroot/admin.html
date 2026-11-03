@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Администрирование</title>
+<link rel="stylesheet" href="/lib/bootstrap.min.css"><link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="navbar"></div>
+<div class="container">
+  <div class="row g-3">
+    <div class="col-lg-6">
+      <div class="card mb-3"><div class="card-body">
+        <h6>Сканер (COM-порт)</h6>
+        <div class="mb-2"><label class="form-label">Порт</label>
+          <select id="com_port" class="form-select"></select>
+          <div class="form-text">Состояние: <span id="scState"></span></div></div>
+        <div class="row g-2">
+          <div class="col"><label class="form-label">Скорость</label>
+            <select id="com_baud" class="form-select">
+              <option>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option>
+            </select></div>
+          <div class="col"><label class="form-label">Биты данных</label>
+            <select id="com_databits" class="form-select"><option>8</option><option>7</option></select></div>
+          <div class="col"><label class="form-label">Чётность</label>
+            <select id="com_parity" class="form-select"><option>None</option><option>Even</option><option>Odd</option></select></div>
+          <div class="col"><label class="form-label">Стоп-биты</label>
+            <select id="com_stopbits" class="form-select"><option>One</option><option>Two</option></select></div>
+        </div>
+      </div></div>
+
+      <div class="card"><div class="card-body">
+        <h6>Сервер</h6>
+        <div class="mb-2"><label class="form-label">Адрес веб-интерфейса (нужен перезапуск)</label>
+          <input id="http_url" class="form-control mono" placeholder="http://0.0.0.0:5080"></div>
+      </div></div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card mb-3"><div class="card-body">
+        <h6>Честный ЗНАК (True API)</h6>
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" id="cz_enabled">
+          <label class="form-check-label" for="cz_enabled">Проверять коды в ЧЗ</label></div>
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" id="cz_offline_mode">
+          <label class="form-check-label" for="cz_offline_mode">Офлайн-тест (имитация ответа ЧЗ, без сети)</label>
+          <div class="form-text">Для теста станции без реального токена/связи: случайный успех (~85%) или отказ.</div></div>
+        <div class="mb-2"><label class="form-label">Токен доступа (X-API-KEY, из ЛК: Профиль → «Токен для ККТ»)</label>
+          <textarea id="cz_token" class="form-control mono" rows="3" placeholder="Вставьте новый токен"></textarea>
+          <div class="form-text">Текущий: <span id="tokenMasked" class="mono">не задан</span>.
+            Токен ККТ выдаётся один на ИНН, обновляется вручную при необходимости.</div></div>
+        <div class="mb-2"><label class="form-label">Базовый URL (CDN)</label>
+          <input id="cz_base_url" class="form-control mono" placeholder="https://cdn.crpt.ru">
+          <div class="form-text">Оставьте <code>https://cdn.crpt.ru</code> — актуальная площадка (cdn01/cdn04/...) определится автоматически. Можно указать конкретную площадку (например, <code>https://cdn01.crpt.ru</code>) — тогда автообнаружение отключается.</div></div>
+        <div class="row g-2 mb-2">
+          <div class="col"><label class="form-label">ИНН организации</label>
+            <input id="company_inn" class="form-control mono"></div>
+          <div class="col"><label class="form-label">Таймаут, сек</label>
+            <input id="cz_timeout" class="form-control" type="number" min="3" max="60"></div>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" id="btnTest">Проверить связь с ЧЗ</button>
+        <div id="testMsg" class="small mt-2"></div>
+      </div></div>
+
+      <div class="card"><div class="card-body">
+        <h6>Рабочее место</h6>
+        <div class="mb-2"><label class="form-label">Название станции</label>
+          <input id="station_name" class="form-control" placeholder="Упаковка №1"></div>
+        <div class="mb-2"><label class="form-label">Оператор по умолчанию</label>
+          <input id="operator_name" class="form-control"></div>
+      </div></div>
+    </div>
+  </div>
+  <div class="my-3">
+    <button class="btn btn-primary" id="btnSave">Сохранить настройки</button>
+    <span id="msg" class="ms-2 small"></span>
+  </div>
+
+  <div class="card border-danger mt-3"><div class="card-body">
+    <h6 class="text-danger">Опасная зона</h6>
+    <p class="small text-muted">Перед любым удалением автоматически создаётся копия всей базы в папке <span class="mono">data</span> (файл вида <span class="mono">delete-ГГГГ-ММ-ДД_ЧЧ-ММ-СС.db</span>).</p>
+    <button class="btn btn-outline-danger btn-sm me-2" id="btnClearJournal">Очистить журнал сканирования и ордера</button>
+    <button class="btn btn-outline-danger btn-sm" id="btnClearNomenclature">Очистить справочник номенклатуры</button>
+    <div id="dangerMsg" class="small mt-2"></div>
+  </div></div>
+</div>
+
+<div class="modal fade" id="dangerModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header bg-danger text-white">
+        <h5 class="modal-title" id="dangerTitle">Подтверждение удаления</h5>
+      </div>
+      <div class="modal-body">
+        <p id="dangerText"></p>
+        <p class="text-danger small">Это действие необратимо (кроме восстановления из автоматической копии). Для подтверждения введите слово <strong>УДАЛИТЬ</strong>:</p>
+        <input type="text" id="dangerInput" class="form-control" autocomplete="off">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn btn-danger" id="btnDangerConfirm" disabled>Удалить</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/lib/bootstrap.bundle.min.js"></script><script src="/common.js"></script>
+<script>
+document.getElementById('navbar').innerHTML = nav('/admin.html');
+const keys = ['com_port','com_baud','com_databits','com_parity','com_stopbits','http_url',
+              'cz_base_url','company_inn','cz_timeout','station_name','operator_name'];
+async function load() {
+  const d = await apiGet('/api/settings');
+  const s = d.settings || {};
+  const sel = document.getElementById('com_port');
+  const ports = d.ports || [];
+  if (s.com_port && !ports.includes(s.com_port)) ports.push(s.com_port);
+  sel.innerHTML = '<option value="">— не выбран —</option>' + ports.map(p => `<option>${esc(p)}</option>`).join('');
+  keys.forEach(k => { const el = document.getElementById(k); if (el && s[k] !== undefined) el.value = s[k]; });
+  if (!document.getElementById('cz_base_url').value) document.getElementById('cz_base_url').value = 'https://cdn.crpt.ru';
+  if (!document.getElementById('cz_timeout').value) document.getElementById('cz_timeout').value = 10;
+  if (!document.getElementById('http_url').value) document.getElementById('http_url').value = 'http://0.0.0.0:5080';
+  document.getElementById('cz_enabled').checked = (s.cz_enabled || '1') === '1';
+  document.getElementById('cz_offline_mode').checked = s.cz_offline_mode === '1';
+  document.getElementById('tokenMasked').textContent = s.cz_token_masked || 'не задан';
+  document.getElementById('scState').textContent = d.scanner || '—';
+  setScannerBadge(d.scanner || '—');
+}
+document.getElementById('btnSave').onclick = async () => {
+  const body = {};
+  keys.forEach(k => { const el = document.getElementById(k); if (el) body[k] = el.value.trim(); });
+  body.cz_enabled = document.getElementById('cz_enabled').checked ? '1' : '0';
+  body.cz_offline_mode = document.getElementById('cz_offline_mode').checked ? '1' : '0';
+  const t = document.getElementById('cz_token').value.trim();
+  if (t) body.cz_token = t;
+  await apiPost('/api/settings', body);
+  document.getElementById('cz_token').value = '';
+  document.getElementById('msg').className = 'ms-2 small text-success';
+  document.getElementById('msg').textContent = 'Настройки сохранены';
+  load();
+};
+document.getElementById('btnTest').onclick = async () => {
+  const el = document.getElementById('testMsg');
+  el.textContent = 'Запрос…';
+  const d = await apiPost('/api/cz/test', {});
+  el.className = 'small mt-2 ' + (d.ok ? 'text-success' : 'text-danger');
+  el.textContent = d.message + (d.raw ? ' | ' + d.raw.substring(0, 200) : '');
+};
+load();
+
+// --- Опасная зона: очистка базы ---
+let dangerModal, dangerAction = null;
+function openDanger(text, endpoint) {
+  dangerAction = endpoint;
+  document.getElementById('dangerText').textContent = text;
+  document.getElementById('dangerInput').value = '';
+  document.getElementById('btnDangerConfirm').disabled = true;
+  document.getElementById('dangerMsg').textContent = '';
+  dangerModal = dangerModal || new bootstrap.Modal(document.getElementById('dangerModal'));
+  dangerModal.show();
+}
+document.getElementById('btnClearJournal').onclick = () =>
+  openDanger('Будут удалены все записи журнала сканирования и все ордера (включая активный). Справочник номенклатуры не затронется.', '/api/admin/clear-journal');
+document.getElementById('btnClearNomenclature').onclick = () =>
+  openDanger('Будет полностью очищен справочник номенклатуры (все связки GTIN → Код 1С). Журнал и ордера не затронутся.', '/api/admin/clear-nomenclature');
+document.getElementById('dangerInput').addEventListener('input', e => {
+  document.getElementById('btnDangerConfirm').disabled = e.target.value.trim() !== 'УДАЛИТЬ';
+});
+document.getElementById('btnDangerConfirm').onclick = async () => {
+  if (document.getElementById('dangerInput').value.trim() !== 'УДАЛИТЬ') return;
+  try {
+    const d = await apiPost(dangerAction, {});
+    dangerModal.hide();
+    document.getElementById('dangerMsg').className = 'small mt-2 text-success';
+    document.getElementById('dangerMsg').textContent = 'Готово. Резервная копия: ' + d.backup;
+  } catch (e) {
+    document.getElementById('dangerMsg').className = 'small mt-2 text-danger';
+    document.getElementById('dangerMsg').textContent = 'Ошибка: ' + e.message;
+  }
+};
+</script>
+</body>
+</html>
