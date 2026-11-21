@@ -10,13 +10,17 @@ public class ParsedOrder
     public string OrderNumber { get; set; }
     public string Recipient { get; set; }
     public string Warehouse { get; set; }
+    /// <summary>Строка «Распоряжение» (основание), напр. «Заказ клиента № ИБ-15125 от 21 ноября 2026 г.».</summary>
+    public string Instruction { get; set; }
+    /// <summary>true — в таблице колонка «Артикул» (новая форма), false — «Код» (код номенклатуры 1С).</summary>
+    public bool ByArticle { get; set; }
     public List<OrderLine> Lines { get; set; } = new();
 }
 
 /// <summary>
 /// Разбор печатной формы «Расходный ордер на товары» из 1С (.xlsx).
 /// Логика устойчива к объединённым ячейкам и сдвигу колонок:
-/// колонки шапки («Код», «Товар», «Количество») определяются по заголовкам,
+/// колонки шапки («Код» или «Артикул», «Товар», «Количество») определяются по заголовкам,
 /// значения строк распределяются по диапазонам этих колонок.
 /// </summary>
 public static class OrderParser
@@ -44,6 +48,8 @@ public static class OrderParser
                 }
                 if (val.StartsWith("Получатель", StringComparison.OrdinalIgnoreCase))
                     res.Recipient = NextValue(cells, col);
+                if (res.Instruction == null && val.StartsWith("Распоряжение", StringComparison.OrdinalIgnoreCase))
+                    res.Instruction = NextValue(cells, col);
                 if (val.StartsWith("Склад", StringComparison.OrdinalIgnoreCase))
                     res.Warehouse = NextValue(cells, col);
             }
@@ -55,7 +61,7 @@ public static class OrderParser
         for (int r = 1; r <= lastRow; r++)
         {
             var cells = RowCells(ws, r, lastCol);
-            bool hasCode = cells.Any(c => Eq(c.Val, "Код"));
+            bool hasCode = cells.Any(c => Eq(c.Val, "Код") || Eq(c.Val, "Артикул"));
             bool hasName = cells.Any(c => Eq(c.Val, "Товар") || Eq(c.Val, "Номенклатура"));
             bool hasQty = cells.Any(c => c.Val.Contains("Количество", StringComparison.OrdinalIgnoreCase));
             if (hasCode && hasName && hasQty)
@@ -66,10 +72,12 @@ public static class OrderParser
             }
         }
         if (headerRow < 0)
-            throw new InvalidOperationException("Не найдена таблица товаров: нет строки с заголовками «Код», «Товар», «Количество».");
+            throw new InvalidOperationException("Не найдена таблица товаров: нет строки с заголовками «Код»/«Артикул», «Товар», «Количество».");
 
         // Индексы колонок
-        int colCode = headers.First(h => Eq(h.Text, "Код")).Col;
+        var codeHeader = headers.First(h => Eq(h.Text, "Код") || Eq(h.Text, "Артикул"));
+        int colCode = codeHeader.Col;
+        res.ByArticle = Eq(codeHeader.Text, "Артикул");
         int colName = headers.First(h => Eq(h.Text, "Товар") || Eq(h.Text, "Номенклатура")).Col;
         var qtyCols = headers.Where(h => h.Text.Contains("Количество", StringComparison.OrdinalIgnoreCase)).ToList();
         // «Количество» в базовых единицах приоритетнее, чем «Количество (упаковок)»
@@ -111,7 +119,8 @@ public static class OrderParser
             res.Lines.Add(new OrderLine
             {
                 LineNo = lineNo,
-                Code1C = code.Trim(),
+                Code1C = res.ByArticle ? null : code.Trim(),
+                Article = res.ByArticle ? code.Trim() : null,
                 Name = name.Trim(),
                 Qty = qty,
                 Unit = unit,

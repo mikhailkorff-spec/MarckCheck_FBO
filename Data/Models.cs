@@ -24,6 +24,15 @@ public class Order
     /// <summary>active | closed</summary>
     public string Status { get; set; }
     public string DocumentJson { get; set; }
+    /// <summary>Путь к печатной форме относительно общей папки (null — файл загружен вручную).</summary>
+    public string SourcePath { get; set; }
+    /// <summary>Строка «Распоряжение» из печатной формы, напр. «Заказ клиента № ИБ-15125 от 21 ноября 2026 г.».</summary>
+    public string Instruction { get; set; }
+    /// <summary>Тип отгрузки: FBO (эта программа) | FBS (WbPackStation) — задел для объединения.</summary>
+    public string ShipmentType { get; set; } = "FBO";
+    public int? Boxes { get; set; }
+    /// <summary>Итог завершения: куда сохранён КИЗ-файл, переименование, отправка в Битрикс.</summary>
+    public string FinishInfo { get; set; }
 }
 
 /// <summary>Строка расходного ордера.</summary>
@@ -41,6 +50,13 @@ public class OrderLine
     /// для этого Code1C однозначно известен GTIN, или вручную через окно сопоставления). Основной
     /// ключ сопоставления скана со строкой ордера — точнее, чем сравнение по тексту наименования.
     public string Gtin { get; set; }
+    /// <summary>Артикул из печатной формы (если в ордере колонка «Артикул» вместо «Код»).</summary>
+    public string Article { get; set; }
+    /// <summary>Ключ позиции из базы ШК: Код1С|характеристика. По нему скан находит строку.</summary>
+    public string SkuKey { get; set; }
+    /// <summary>ok — позиция однозначно найдена в базе ШК; none — не найдена; amb — несколько вариантов.</summary>
+    public string MatchStatus { get; set; }
+    public string MatchInfo { get; set; }
     // Расчётное поле (не хранится)
     public int ScannedQty { get; set; }
 }
@@ -109,7 +125,7 @@ public class JournalRow
 /// <summary>Результат обработки сканирования, отправляемый в браузер.</summary>
 public class ScanResult
 {
-    public string Status { get; set; }          // ok | pending | error | need_mapping | duplicate
+    public string Status { get; set; }          // ok | pending | error | duplicate
     public string Message { get; set; }
     public long? ScanId { get; set; }
     public long? OrderId { get; set; }

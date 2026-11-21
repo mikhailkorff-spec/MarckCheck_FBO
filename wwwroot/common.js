@@ -35,14 +35,14 @@ const Sound = (() => {
 
 function nav(active) {
     const items = [
-        ['/', 'Проверка'],
-        ['/nomenclature.html', 'Номенклатура'],
+        ['/', 'Сборка ФБО'],
+        ['/nomenclature.html', 'База ШК'],
         ['/journal.html', 'Журнал'],
         ['/admin.html', 'Администрирование']
     ];
     return `<nav class="navbar navbar-expand navbar-dark bg-dark mb-3">
       <div class="container-fluid">
-        <span class="navbar-brand">Станция проверки КМ</span>
+        <span class="navbar-brand">Станция сборки ФБО</span>
         <ul class="navbar-nav me-auto">
           ${items.map(([h, t]) => `<li class="nav-item"><a class="nav-link ${active === h ? 'active fw-bold' : ''}" href="${h}">${t}</a></li>`).join('')}
         </ul>

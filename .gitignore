@@ -11,3 +11,4 @@ data/
 .vs/
 .vscode/
 *.user
+*.key

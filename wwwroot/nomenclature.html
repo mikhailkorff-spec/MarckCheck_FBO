@@ -2,90 +2,73 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Номенклатура</title>
+<title>База штрихкодов</title>
 <link rel="stylesheet" href="/lib/bootstrap.min.css"><link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div id="navbar"></div>
 <div class="container-fluid">
   <div class="row g-3">
-    <div class="col-lg-8">
+    <div class="col-lg-9">
       <div class="d-flex gap-2 mb-2">
-        <input id="q" class="form-control" placeholder="Поиск по коду 1С, наименованию или GTIN">
+        <input id="q" class="form-control" placeholder="Поиск по штрихкоду, коду, артикулу, наименованию, характеристике">
         <button class="btn btn-outline-secondary" id="btnSearch">Найти</button>
       </div>
-      <table class="table table-sm table-bordered">
-        <thead class="table-light"><tr><th>Код 1С</th><th>Наименование</th><th>GTIN</th><th>Маркир.</th><th></th></tr></thead>
+      <div class="small text-muted mb-1" id="total"></div>
+      <table class="table table-sm table-bordered small">
+        <thead class="table-light"><tr><th>GTIN</th><th>Штрихкод</th><th>Код</th><th>Артикул</th><th>Наименование для печати</th><th>Характеристика</th></tr></thead>
         <tbody id="body"></tbody>
       </table>
     </div>
-    <div class="col-lg-4">
-      <div class="card mb-3">
-        <div class="card-body">
-          <h6 id="formTitle">Новая позиция</h6>
-          <input type="hidden" id="fId">
-          <div class="mb-2"><label class="form-label">Код 1С</label><input id="fCode" class="form-control mono"></div>
-          <div class="mb-2"><label class="form-label">Наименование</label><input id="fName" class="form-control"></div>
-          <div class="mb-2"><label class="form-label">GTIN (14 цифр)</label><input id="fGtin" class="form-control mono"></div>
-          <div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="fMarked" checked>
-            <label class="form-check-label" for="fMarked">Подлежит маркировке (проверять в ЧЗ)</label></div>
-          <button class="btn btn-primary" id="btnSave">Сохранить</button>
-          <button class="btn btn-link" id="btnReset">Очистить</button>
-          <div id="msg" class="small mt-2"></div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-body">
-          <h6>Импорт из XLSX</h6>
-          <p class="small text-muted mb-2">Файл выгрузки из 1С (.xlsx) с колонками: <span class="mono">Штрихкод | Номенклатура.Код | Номенклатура.Наименование | Характеристика.Наименование</span>. Штрихкод может быть в виде числа (13–14 цифр), GS1-строки с (01)... или с суффиксом **. Один код 1С может повторяться в нескольких строках с разными штрихкодами.</p>
-          <input type="file" id="csvFile" class="form-control mb-2" accept=".xlsx">
-          <button class="btn btn-outline-primary btn-sm" id="btnImport">Импортировать</button>
-          <div id="impMsg" class="small mt-2"></div>
-        </div>
-      </div>
+    <div class="col-lg-3">
+      <div class="card mb-3"><div class="card-body">
+        <h6>Загрузить отчёт по ШК</h6>
+        <p class="small text-muted mb-2">Отчёт из 1С (.xlsx): <span class="mono">Штрихкод | Номенклатура.Код | Номенклатура.Наименование | Характеристика.Наименование | …для печати | Номенклатура.Артикул</span>.
+          База заменяется целиком, открытый ордер пересопоставляется.</p>
+        <input type="file" id="xlsFile" class="form-control mb-2" accept=".xlsx">
+        <button class="btn btn-primary btn-sm" id="btnImport">Загрузить</button>
+        <div id="impMsg" class="small mt-2"></div>
+      </div></div>
+      <div class="card"><div class="card-body">
+        <h6>Автозагрузка из папки</h6>
+        <p class="small text-muted mb-2">Путь задаётся в «Администрировании». Проверка — раз в минуту, берётся самый свежий .xlsx.</p>
+        <div class="small mb-2" id="last"></div>
+        <button class="btn btn-outline-secondary btn-sm" id="btnSync">Загрузить из папки сейчас</button>
+        <div id="syncMsg" class="small mt-2"></div>
+      </div></div>
     </div>
   </div>
 </div>
 <script src="/lib/bootstrap.bundle.min.js"></script><script src="/common.js"></script>
 <script>
 document.getElementById('navbar').innerHTML = nav('/nomenclature.html');
-let items = [];
 async function load() {
-  items = await apiGet('/api/products?q=' + encodeURIComponent(document.getElementById('q').value || ''));
-  document.getElementById('body').innerHTML = items.map(p => `<tr>
-    <td class="mono">${esc(p.code1C)}</td><td>${esc(p.name)}</td><td class="mono">${esc(p.gtin)}</td>
-    <td class="text-center">${p.marked ? '✔' : ''}</td>
-    <td class="text-nowrap">
-      <button class="btn btn-sm btn-outline-primary" onclick="edit(${p.id})">Изм.</button>
-      <button class="btn btn-sm btn-outline-danger" onclick="del(${p.id})">Удалить</button></td></tr>`).join('');
+  const d = await apiGet('/api/barcodes?q=' + encodeURIComponent(q.value || ''));
+  total.textContent = `Всего штрихкодов в базе: ${d.total}` + (d.rows.length >= 500 ? ' (показаны первые 500)' : '');
+  last.textContent = d.last ? 'Последняя загрузка: ' + d.last : 'База ещё не загружалась';
+  body.innerHTML = d.rows.map(r => `<tr>
+    <td class="mono">${esc(r.gtin)}</td><td class="mono">${esc(r.rawBarcode)}</td><td class="mono">${esc(r.code1C)}</td>
+    <td class="mono">${esc(r.article)}</td><td>${esc(r.printName)}</td><td>${esc(r.printCharacteristic)}</td></tr>`).join('');
 }
-function edit(id) {
-  const p = items.find(x => x.id === id);
-  fId.value = p.id; fCode.value = p.code1C; fName.value = p.name; fGtin.value = p.gtin; fMarked.checked = p.marked;
-  formTitle.textContent = 'Изменение позиции';
-}
-async function del(id) { if (confirm('Удалить позицию?')) { await apiDelete('/api/products/' + id); load(); } }
-btnReset.onclick = () => { fId.value=''; fCode.value=''; fName.value=''; fGtin.value=''; fMarked.checked=true; formTitle.textContent='Новая позиция'; msg.textContent=''; };
-btnSave.onclick = async () => {
-  const gtin = fGtin.value.trim();
-  if (!/^\d{8,14}$/.test(gtin)) { msg.className='small mt-2 text-danger'; msg.textContent='GTIN должен содержать 8–14 цифр'; return; }
-  try {
-    await apiPost('/api/products', { id: +(fId.value || 0), code1C: fCode.value.trim(), name: fName.value.trim(), gtin: gtin.padStart(14, '0'), marked: fMarked.checked });
-    msg.className='small mt-2 text-success'; msg.textContent='Сохранено'; btnReset.onclick(); load();
-  } catch (e) { msg.className='small mt-2 text-danger'; msg.textContent = e.message; }
-};
 btnSearch.onclick = load;
 q.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
 btnImport.onclick = async () => {
-  const f = csvFile.files[0]; if (!f) return;
+  const f = xlsFile.files[0]; if (!f) return;
+  impMsg.textContent = 'Загрузка…';
   const fd = new FormData(); fd.append('file', f);
-  const r = await fetch('/api/products/import', { method: 'POST', body: fd });
+  const r = await fetch('/api/barcodes/import', { method: 'POST', body: fd });
   const d = await r.json();
   if (r.ok) {
-    let t = `Загружено: ${d.imported}, пропущено: ${d.skipped}`;
-    if (d.warnings && d.warnings.length) t += '<br><span class="text-warning">' + d.warnings.map(esc).join('<br>') + '</span>';
-    impMsg.innerHTML = t;
-  } else { impMsg.textContent = 'Ошибка: ' + d.error; }
+    impMsg.className = 'small mt-2 text-success';
+    impMsg.innerHTML = `Загружено: ${d.imported}, пропущено: ${d.skipped}` +
+      (d.warnings && d.warnings.length ? '<br><span class="text-warning">' + d.warnings.map(esc).join('<br>') + '</span>' : '');
+  } else { impMsg.className = 'small mt-2 text-danger'; impMsg.textContent = 'Ошибка: ' + d.error; }
+  load();
+};
+btnSync.onclick = async () => {
+  syncMsg.textContent = 'Загрузка…';
+  try { const d = await apiPost('/api/barcodes/sync'); syncMsg.className = 'small mt-2'; syncMsg.textContent = d.message; }
+  catch (e) { syncMsg.className = 'small mt-2 text-danger'; syncMsg.textContent = e.message; }
   load();
 };
 load();

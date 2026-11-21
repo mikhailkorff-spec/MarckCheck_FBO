@@ -114,11 +114,40 @@ CREATE TABLE IF NOT EXISTS OrderReports (
     CreatedAt TEXT NOT NULL
 );");
 
-        // Миграция для баз, созданных до добавления колонки Gtin в OrderLines.
-        var hasGtinCol = c.Query("PRAGMA table_info(OrderLines)")
-            .Any(r => string.Equals((string)r.name, "Gtin", StringComparison.OrdinalIgnoreCase));
-        if (!hasGtinCol)
-            c.Execute("ALTER TABLE OrderLines ADD COLUMN Gtin TEXT;");
+        c.Execute(@"
+CREATE TABLE IF NOT EXISTS Barcodes (
+    Id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    Gtin                TEXT NOT NULL,
+    RawBarcode          TEXT,
+    Code1C              TEXT NOT NULL,
+    Name                TEXT,
+    Characteristic      TEXT,
+    PrintName           TEXT,
+    PrintCharacteristic TEXT,
+    Article             TEXT,
+    SkuKey              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS IX_Barcodes_Gtin ON Barcodes(Gtin);
+CREATE INDEX IF NOT EXISTS IX_Barcodes_Code ON Barcodes(Code1C);");
+
+        // Миграции: добавляем недостающие колонки в базы старых версий.
+        AddColumn(c, "OrderLines", "Gtin", "TEXT");
+        AddColumn(c, "OrderLines", "Article", "TEXT");
+        AddColumn(c, "OrderLines", "SkuKey", "TEXT");
+        AddColumn(c, "OrderLines", "MatchStatus", "TEXT");
+        AddColumn(c, "OrderLines", "MatchInfo", "TEXT");
+        AddColumn(c, "Orders", "SourcePath", "TEXT");
+        AddColumn(c, "Orders", "Instruction", "TEXT");
+        AddColumn(c, "Orders", "ShipmentType", "TEXT NOT NULL DEFAULT 'FBO'");
+        AddColumn(c, "Orders", "Boxes", "INTEGER");
+        AddColumn(c, "Orders", "FinishInfo", "TEXT");
+    }
+
+    private static void AddColumn(SqliteConnection c, string table, string col, string type)
+    {
+        var exists = c.Query($"PRAGMA table_info({table})")
+            .Any(r => string.Equals((string)r.name, col, StringComparison.OrdinalIgnoreCase));
+        if (!exists) c.Execute($"ALTER TABLE {table} ADD COLUMN {col} {type};");
     }
 
     public string GetSetting(string key, string def = null)

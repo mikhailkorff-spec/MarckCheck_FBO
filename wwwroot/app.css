@@ -18,3 +18,4 @@ tr.row-done td { font-weight: 600; }
 .order-table td, .order-table th { vertical-align: middle; }
 .order-table td:nth-child(2) { white-space: nowrap; }
 .badge-scanner { font-weight: 500; }
+.files-list { max-height: 60vh; overflow-y: auto; }

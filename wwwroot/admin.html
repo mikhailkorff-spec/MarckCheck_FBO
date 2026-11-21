@@ -29,6 +29,32 @@
         </div>
       </div></div>
 
+      <div class="card mb-3"><div class="card-body">
+        <h6>Папки</h6>
+        <div class="mb-2"><label class="form-label">Общая папка печатных форм «Расходный ордер» (поиск по всем подпапкам)</label>
+          <input id="orders_root" class="form-control mono" placeholder="\\server\Склад\Печатные формы">
+          <div class="form-text">Собранный файл получает префикс «СОБРАН - », рядом сохраняется «КИЗ - …xlsx».</div></div>
+        <div class="mb-2"><label class="form-label">Отчёт по ШК для автозагрузки (файл или папка)</label>
+          <input id="barcodes_path" class="form-control mono" placeholder="\\server\Склад\ШК">
+          <div class="form-text">Если папка — берётся самый свежий .xlsx. Пусто — только ручная загрузка на странице «База ШК».</div></div>
+        <div class="mb-2"><label class="form-label">Содержимое файла КИЗ</label>
+          <select id="kiz_format" class="form-select">
+            <option value="cis">Код идентификации (01 GTIN 21 серийный) — без крипто-хвоста</option>
+            <option value="full">Полный код как отсканирован (с крипто-хвостом)</option>
+          </select></div>
+      </div></div>
+      <div class="card mb-3"><div class="card-body">
+        <h6>Битрикс24 — отбивка о сборке</h6>
+        <div class="mb-2"><label class="form-label">URL входящего вебхука (с токеном)</label>
+          <input id="bitrix_webhook" class="form-control mono" placeholder="https://portal.bitrix24.ru/rest/1/xxxxxxxx/" autocomplete="off">
+          <div class="form-text">Хранится зашифрованным. Сейчас: <span id="bxState">не задан</span>. Оставьте пустым, чтобы не менять.</div></div>
+        <div class="mb-2"><label class="form-label">Правила: папка = чат (DIALOG_ID), по одному в строке</label>
+          <textarea id="bitrix_rules" class="form-control mono" rows="3" placeholder="БУСТ ЛАЙФ = chat12345"></textarea>
+          <div class="form-text">Если печатная форма лежит в папке с таким именем (на любом уровне), после сборки уйдёт сообщение:
+            «ФБО / Распоряжение / Собран. / Количество единиц / Количество коробов».</div></div>
+        <button class="btn btn-outline-secondary btn-sm" id="btnBxTest">Отправить тестовое сообщение</button>
+        <div id="bxMsg" class="small mt-2"></div>
+      </div></div>
       <div class="card"><div class="card-body">
         <h6>Сервер</h6>
         <div class="mb-2"><label class="form-label">Адрес веб-интерфейса (нужен перезапуск)</label>
@@ -81,7 +107,7 @@
     <h6 class="text-danger">Опасная зона</h6>
     <p class="small text-muted">Перед любым удалением автоматически создаётся копия всей базы в папке <span class="mono">data</span> (файл вида <span class="mono">delete-ГГГГ-ММ-ДД_ЧЧ-ММ-СС.db</span>).</p>
     <button class="btn btn-outline-danger btn-sm me-2" id="btnClearJournal">Очистить журнал сканирования и ордера</button>
-    <button class="btn btn-outline-danger btn-sm" id="btnClearNomenclature">Очистить справочник номенклатуры</button>
+    <button class="btn btn-outline-danger btn-sm" id="btnClearNomenclature">Очистить базу ШК</button>
     <div id="dangerMsg" class="small mt-2"></div>
   </div></div>
 </div>
@@ -108,7 +134,8 @@
 <script>
 document.getElementById('navbar').innerHTML = nav('/admin.html');
 const keys = ['com_port','com_baud','com_databits','com_parity','com_stopbits','http_url',
-              'cz_base_url','company_inn','cz_timeout','station_name','operator_name'];
+              'cz_base_url','company_inn','cz_timeout','station_name','operator_name',
+              'orders_root','barcodes_path','kiz_format','bitrix_rules'];
 async function load() {
   const d = await apiGet('/api/settings');
   const s = d.settings || {};
@@ -122,6 +149,8 @@ async function load() {
   if (!document.getElementById('http_url').value) document.getElementById('http_url').value = 'http://0.0.0.0:5080';
   document.getElementById('cz_enabled').checked = (s.cz_enabled || '1') === '1';
   document.getElementById('cz_offline_mode').checked = s.cz_offline_mode === '1';
+  if (!document.getElementById('kiz_format').value) document.getElementById('kiz_format').value = 'cis';
+  document.getElementById('bxState').textContent = s.bitrix_webhook_set === '1' ? 'задан' : 'не задан';
   document.getElementById('tokenMasked').textContent = s.cz_token_masked || 'не задан';
   document.getElementById('scState').textContent = d.scanner || '—';
   setScannerBadge(d.scanner || '—');
@@ -133,8 +162,12 @@ document.getElementById('btnSave').onclick = async () => {
   body.cz_offline_mode = document.getElementById('cz_offline_mode').checked ? '1' : '0';
   const t = document.getElementById('cz_token').value.trim();
   if (t) body.cz_token = t;
+  const bx = document.getElementById('bitrix_webhook').value.trim();
+  if (bx) body.bitrix_webhook = bx;
+  body.bitrix_rules = document.getElementById('bitrix_rules').value;
   await apiPost('/api/settings', body);
   document.getElementById('cz_token').value = '';
+  document.getElementById('bitrix_webhook').value = '';
   document.getElementById('msg').className = 'ms-2 small text-success';
   document.getElementById('msg').textContent = 'Настройки сохранены';
   load();
@@ -162,7 +195,7 @@ function openDanger(text, endpoint) {
 document.getElementById('btnClearJournal').onclick = () =>
   openDanger('Будут удалены все записи журнала сканирования и все ордера (включая активный). Справочник номенклатуры не затронется.', '/api/admin/clear-journal');
 document.getElementById('btnClearNomenclature').onclick = () =>
-  openDanger('Будет полностью очищен справочник номенклатуры (все связки GTIN → Код 1С). Журнал и ордера не затронутся.', '/api/admin/clear-nomenclature');
+  openDanger('Будет полностью очищена база штрихкодов (отчёт по ШК). Журнал и ордера не затронутся.', '/api/admin/clear-nomenclature');
 document.getElementById('dangerInput').addEventListener('input', e => {
   document.getElementById('btnDangerConfirm').disabled = e.target.value.trim() !== 'УДАЛИТЬ';
 });

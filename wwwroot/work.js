@@ -2,7 +2,7 @@
 document.getElementById('navbar').innerHTML = nav('/');
 
 let state = { order: null, lines: [], scans: [] };
-let mapModal = null, pendingRaw = null, codesModal = null;
+let codesModal = null, boxesModal = null, files = [];
 
 async function load() {
     state = await apiGet('/api/state');
@@ -10,10 +10,13 @@ async function load() {
     const has = !!state.order;
     document.getElementById('workPanel').classList.toggle('d-none', !has);
     document.getElementById('uploadPanel').classList.toggle('d-none', has);
-    if (!has) return;
+    if (!has) { loadFiles(); return; }
     document.getElementById('orderNum').textContent = state.order.orderNumber || ('#' + state.order.id);
     document.getElementById('orderMeta').textContent =
         ' · ' + (state.order.recipient || '') + ' · начато ' + (state.order.createdAt || '');
+    document.getElementById('orderInstr').textContent =
+        (state.order.instruction ? 'Распоряжение: ' + state.order.instruction : '') +
+        (state.order.sourcePath ? ' · файл: ' + state.order.sourcePath : '');
     renderLines();
     renderScans();
 }
@@ -25,11 +28,17 @@ function renderLines() {
         plan += l.qty; done += l.scannedQty;
         const cls = l.scannedQty >= l.qty ? 'row-ok row-done' : (l.scannedQty > 0 ? 'row-wait' : '');
         return `<tr class="${cls}" data-line="${l.id}">
-          <td>${l.lineNo}</td><td class="mono">${esc(l.code1C)}</td><td>${esc(l.name)}</td>
+          <td>${l.lineNo}</td><td class="mono">${esc(l.article || l.code1C)}</td><td>${esc(l.name)}</td>
           <td class="text-center">${l.qty}</td>
           <td class="text-center fw-bold">${l.scannedQty}</td>
-          <td class="text-center">${l.requiresMarking ? '✔' : ''}</td></tr>`;
+          <td class="text-center">${l.requiresMarking ? '✔' : ''}</td>
+          <td class="text-center" title="${esc(l.matchInfo || '')}">${l.matchStatus === 'ok' ? '<span class="text-success">●</span>' : '<span class="text-danger fw-bold">✖</span>'}</td></tr>`;
     }).join('');
+    const bad = state.lines.filter(l => l.matchStatus !== 'ok');
+    const w = document.getElementById('matchWarn');
+    w.classList.toggle('d-none', bad.length === 0);
+    w.innerHTML = bad.length ? `Не найдено в базе ШК строк: ${bad.length}. Такие товары не примутся при сканировании — обновите отчёт по ШК в 1С.<br>` +
+        bad.map(l => `№${l.lineNo}: ${esc(l.matchInfo || '')}`).join('<br>') : '';
     document.getElementById('progressText').textContent =
         `Проверено ${done} из ${plan} единиц (${plan ? Math.round(done / plan * 100) : 0}%)`;
 }
@@ -63,7 +72,6 @@ function showStatus(res) {
     let cls = 'st-idle', txt = res.message || '';
     if (res.status === 'ok') { cls = 'st-ok'; txt = '✔ ' + (res.productName || '') + '<br><small>' + esc(res.message || '') + '</small>'; Sound.ok(); }
     else if (res.status === 'pending') { cls = 'st-wait'; txt = 'Проверка в ЧЗ…'; Sound.wait(); }
-    else if (res.status === 'need_mapping') { cls = 'st-wait'; txt = 'Требуется сопоставление GTIN'; Sound.wait(); }
     else { cls = 'st-err'; txt = '✖ ' + esc(res.message || 'Ошибка') + (res.needSetAside ? '<br><small>ОТЛОЖИТЬ ТОВАР</small>' : ''); Sound.error(); }
     el.className = 'big-status mb-2 ' + cls;
     el.innerHTML = txt;
@@ -71,35 +79,56 @@ function showStatus(res) {
 
 function handleResult(res) {
     showStatus(res);
-    if (res.status === 'need_mapping') openMapping(res);
     load();
 }
 
-// --- Сопоставление GTIN ---
-function openMapping(res) {
-    pendingRaw = res.dataMatrix;
-    document.getElementById('mapGtin').textContent = res.gtin;
-
-    document.getElementById('mapList').innerHTML = state.lines.map(l => `
-        <button type="button" class="list-group-item list-group-item-action" onclick="doMap('${res.gtin}',${l.id})">
-           <strong>${esc(l.name)}</strong><br><span class="mono small">${esc(l.code1C)}</span>
-           <span class="badge bg-secondary float-end">${l.scannedQty} / ${l.qty}</span></button>`).join('');
-    mapModal = mapModal || new bootstrap.Modal(document.getElementById('mapModal'));
-    mapModal.show();
+// --- Список печатных форм в общей папке ---
+async function loadFiles() {
+    const all = document.getElementById('showCollected').checked ? 1 : 0;
+    const d = await apiGet('/api/files?all=' + all);
+    files = d.files || [];
+    document.getElementById('rootInfo').textContent = d.root ? 'Папка: ' + d.root : '';
+    document.getElementById('filesMsg').textContent = d.error || '';
+    renderFiles();
 }
-
-async function doMap(gtin, orderLineId) {
-    mapModal.hide();
-    // orderLineId — точный Id строки ордера, выбранной оператором — выбор однозначен,
-    // не зависит от совпадения текста или кода 1С.
-    const res = await apiPost('/api/map', { gtin, orderLineId, raw: pendingRaw });
-    handleResult(res);
+function renderFiles() {
+    const q = document.getElementById('fileSearch').value.trim().toLowerCase();
+    const list = files.filter(f => !q || f.path.toLowerCase().includes(q));
+    document.getElementById('filesBody').innerHTML = list.map((f, i) => `
+      <tr class="${f.collected ? 'text-muted' : ''}">
+        <td>${esc(f.name)}</td><td class="small">${esc(f.folder)}</td><td class="small text-nowrap">${esc(f.modified)}</td>
+        <td><button class="btn btn-sm ${f.collected ? 'btn-outline-secondary' : 'btn-primary'}" onclick="openFile(${files.indexOf(f)})">Собрать</button></td>
+      </tr>`).join('') || '<tr><td colspan="4" class="text-muted small">Нет файлов для сборки</td></tr>';
 }
-
-document.getElementById('btnMapAside').onclick = () => {
-    mapModal.hide();
-    showStatus({ status: 'error', message: 'Товар не относится к ордеру — отложите', needSetAside: true });
-};
+async function openFile(i) {
+    const f = files[i];
+    if (f.collected && !confirm('Этот ордер уже собран. Открыть повторно?')) return;
+    const msg = document.getElementById('uploadMsg');
+    let r = await fetch('/api/orders/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, force: false }) });
+    let d = await r.json();
+    if (r.status === 409) {
+        if (!confirm(`Уже открыт ордер ${d.orderNumber}. Прервать его и открыть новый?`)) return;
+        r = await fetch('/api/orders/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, force: true }) });
+        d = await r.json();
+    }
+    if (!r.ok) { msg.className = 'small mt-2 text-danger'; msg.textContent = 'Ошибка: ' + (d.error || r.status); return; }
+    showWarnings(d);
+    await load();
+}
+function showWarnings(d) {
+    const msg = document.getElementById('uploadMsg');
+    msg.className = 'small mt-2 text-warning';
+    msg.textContent = d.warnings && d.warnings.length ? d.warnings.join(' · ') : '';
+    if (d.warnings && d.warnings.length) setStatusText(d.warnings[0]);
+}
+function setStatusText(t) {
+    const el = document.getElementById('bigStatus');
+    el.className = 'big-status mb-2 st-wait'; el.textContent = t;
+}
+document.getElementById('fileSearch').addEventListener('input', renderFiles);
+document.getElementById('showCollected').onchange = loadFiles;
+document.getElementById('btnRefresh').onclick = loadFiles;
+setInterval(() => { if (!state.order) loadFiles(); }, 15000);
 
 // --- Загрузка ордера ---
 document.getElementById('btnUpload').onclick = async () => {
@@ -117,24 +146,44 @@ document.getElementById('btnUpload').onclick = async () => {
         d = await r.json();
     }
     if (!r.ok) { msg.textContent = 'Ошибка: ' + (d.error || r.status); return; }
-    msg.textContent = `Загружено строк: ${d.lines}` + (d.warnings && d.warnings.length ? ' · ' + d.warnings.join(' ') : '');
+    showWarnings(d);
     await load();
 };
 
-document.getElementById('btnCsv').onclick = async () => {
+// --- Завершение сборки: спросить количество коробов ---
+document.getElementById('btnCsv').onclick = () => {
     const unfinished = state.lines.filter(l => l.scannedQty < l.qty);
-    if (unfinished.length && !confirm('Есть недобранные строки (' + unfinished.length + '). Всё равно завершить?')) return;
-    const orderId = state.order.id;
-    await apiPost('/api/orders/' + orderId + '/close');
-    const { codes } = await apiGet('/api/orders/' + orderId + '/codes');
-    document.getElementById('codesCount').textContent = codes.length;
-    document.getElementById('codesArea').value = codes.join('\n');
-    document.getElementById('linkCsvCodes').href = '/api/orders/' + orderId + '/csv';
-    codesModal = codesModal || new bootstrap.Modal(document.getElementById('codesModal'));
-    codesModal.show();
-    await load();
+    const w = document.getElementById('boxesWarn');
+    w.classList.toggle('d-none', !unfinished.length);
+    w.textContent = unfinished.length ? `Внимание: недобрано строк — ${unfinished.length}.` : '';
+    document.getElementById('boxesUnits').textContent = state.scans.filter(s => s.validationStatus === 'ok').length;
+    document.getElementById('boxesInput').value = '';
+    boxesModal = boxesModal || new bootstrap.Modal(document.getElementById('boxesModal'));
+    boxesModal.show();
+    setTimeout(() => document.getElementById('boxesInput').focus(), 300);
 };
-
+document.getElementById('boxesInput').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('btnFinish').click(); });
+document.getElementById('btnFinish').onclick = async () => {
+    const boxes = parseInt(document.getElementById('boxesInput').value, 10);
+    if (!(boxes >= 1)) { document.getElementById('boxesInput').classList.add('is-invalid'); return; }
+    document.getElementById('boxesInput').classList.remove('is-invalid');
+    const btn = document.getElementById('btnFinish'); btn.disabled = true;
+    try {
+        const orderId = state.order.id;
+        const res = await apiPost('/api/orders/' + orderId + '/finish', { boxes });
+        boxesModal.hide();
+        const { codes } = await apiGet('/api/orders/' + orderId + '/codes');
+        document.getElementById('finishInfo').innerHTML =
+            [`Единиц: ${res.units}, коробов: ${res.boxes}`].concat(res.info || []).map(t => `<li>${esc(t)}</li>`).join('');
+        document.getElementById('codesCount').textContent = codes.length;
+        document.getElementById('codesArea').value = codes.join('\n');
+        document.getElementById('linkCsvCodes').href = '/api/orders/' + orderId + '/csv';
+        codesModal = codesModal || new bootstrap.Modal(document.getElementById('codesModal'));
+        codesModal.show();
+        await load();
+    } catch (e) { alert('Ошибка завершения: ' + e.message); }
+    finally { btn.disabled = false; }
+};
 document.getElementById('btnCopyCodes').onclick = async () => {
     const area = document.getElementById('codesArea');
     try {
@@ -149,7 +198,7 @@ document.getElementById('btnCopyCodes').onclick = async () => {
 };
 
 document.getElementById('btnCancel').onclick = async () => {
-    if (!confirm('Закрыть текущий ордер без выгрузки?')) return;
+    if (!confirm('Прервать сборку? Файл КИЗ не будет создан, печатная форма не отметится как собранная.')) return;
     await apiPost('/api/orders/' + state.order.id + '/close');
     await load();
 };

@@ -29,6 +29,11 @@ builder.Services.AddHttpClient();
 builder.Services.AddSignalR();
 builder.Services.AddScoped<TrueApiClient>();
 builder.Services.AddScoped<ScanProcessor>();
+builder.Services.AddSingleton(new SecretProtector(dataDir));
+builder.Services.AddSingleton<BitrixNotifier>();
+builder.Services.AddSingleton<OrderFolderService>();
+builder.Services.AddSingleton<BarcodeSyncService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BarcodeSyncService>());
 builder.Services.AddSingleton<ScannerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ScannerService>());
 builder.Logging.AddSimpleConsole(o => o.TimestampFormat = "HH:mm:ss ");
@@ -83,60 +88,91 @@ app.MapPost("/api/orders/upload", async (HttpRequest req, Db d) =>
         return Results.Json(new { error = "active_exists", orderNumber = active.OrderNumber }, statusCode: 409);
     if (active != null) c.Execute("UPDATE Orders SET Status='closed', ClosedAt=@n WHERE Id=@id", new { n = Now(), id = active.Id });
 
-    ParsedOrder parsed;
-    List<string> warnings;
     try
     {
         using var ms = new MemoryStream();
         await file.CopyToAsync(ms);
         ms.Position = 0;
-        parsed = OrderParser.Parse(ms, out warnings);
+        return Results.Json(CreateOrder(c, ms, file.FileName, null));
     }
     catch (Exception ex)
     {
         return Results.BadRequest(new { error = "Ошибка разбора файла: " + ex.Message });
     }
+});
 
-    var id = c.ExecuteScalar<long>(@"
-INSERT INTO Orders(OrderNumber,FileName,Recipient,Warehouse,CreatedAt,Status,DocumentJson)
-VALUES(@num,@file,@rec,@wh,@now,'active',@json); SELECT last_insert_rowid();",
-        new
-        {
-            num = parsed.OrderNumber, file = file.FileName, rec = parsed.Recipient,
-            wh = parsed.Warehouse, now = Now(), json = JsonSerializer.Serialize(parsed)
-        });
+// ---------------------------------------------------------------- Печатные формы в общей папке
+app.MapGet("/api/files", (OrderFolderService f, bool all = false) =>
+{
+    var files = f.List(all, out var error);
+    return Results.Json(new { root = f.Root, error, files });
+});
 
-    foreach (var l in parsed.Lines)
+app.MapPost("/api/orders/open", (OpenRequest r, Db d, OrderFolderService f) =>
+{
+    using var c = d.Open();
+    var active = c.QueryFirstOrDefault<Order>("SELECT * FROM Orders WHERE Status='active' ORDER BY Id DESC LIMIT 1");
+    if (active != null && active.SourcePath == r.Path) return Results.Json(new { orderId = active.Id, orderNumber = active.OrderNumber });
+    if (active != null && !r.Force)
+        return Results.Json(new { error = "active_exists", orderNumber = active.OrderNumber }, statusCode: 409);
+    if (active != null) c.Execute("UPDATE Orders SET Status='closed', ClosedAt=@n WHERE Id=@id", new { n = Now(), id = active.Id });
+    try
     {
-        // Если в справочнике для этого Code1C однозначно известен GTIN (товар без разных характеристик
-        // или уже был сопоставлен ранее) — проставляем его сразу. Если несколько GTIN на один Code1C —
-        // оставляем пустым, сопоставление сделает оператор вручную при первом скане.
-        var gtins = c.Query<string>("SELECT DISTINCT Gtin FROM Products WHERE Code1C=@c", new { c = l.Code1C }).ToList();
-        var gtin = gtins.Count == 1 ? gtins[0] : null;
-        c.Execute("INSERT INTO OrderLines(OrderId,LineNo,Code1C,Name,Qty,Unit,RequiresMarking,Gtin) VALUES(@o,@n,@c,@nm,@q,@u,@rm,@g)",
-            new { o = id, n = l.LineNo, c = l.Code1C, nm = l.Name, q = l.Qty, u = l.Unit, rm = l.RequiresMarking ? 1 : 0, g = gtin });
+        using var ms = f.Read(r.Path);
+        return Results.Json(CreateOrder(c, ms, Path.GetFileName(r.Path), r.Path));
     }
+    catch (Exception ex) { return Results.BadRequest(new { error = "Не удалось открыть файл: " + ex.Message }); }
+});
 
-    // автосоздание номенклатуры без GTIN, чтобы её было видно в справочнике
-    return Results.Json(new { orderId = id, orderNumber = parsed.OrderNumber, lines = parsed.Lines.Count, warnings });
+// Завершение сборки: отчёты, файл «КИЗ - …», префикс «СОБРАН - », отбивка в Битрикс24.
+app.MapPost("/api/orders/{id:long}/finish", async (long id, FinishRequest r, Db d, OrderFolderService f, BitrixNotifier bx) =>
+{
+    if (r.Boxes < 1) return Results.BadRequest(new { error = "Укажите количество коробов" });
+    var info = new List<string>();
+    Order order;
+    List<ScannedItem> ok;
+    using (var c = d.Open())
+    {
+        order = c.QueryFirstOrDefault<Order>("SELECT * FROM Orders WHERE Id=@id", new { id });
+        if (order == null) return Results.NotFound();
+        CloseOrder(c, id);
+        c.Execute("UPDATE Orders SET Boxes=@b WHERE Id=@id", new { b = r.Boxes, id });
+        ok = c.Query<ScannedItem>("SELECT * FROM ScannedItems WHERE OrderId=@id AND ValidationStatus='ok' ORDER BY Id", new { id }).ToList();
+    }
+    int units = ok.Count;
+    if (!string.IsNullOrEmpty(order.SourcePath))
+    {
+        var kizFormat = d.GetSetting("kiz_format", "cis");
+        var codes = ok.Where(s => s.Cis != null && !s.Cis.StartsWith("EAN:"))
+                      .Select(s => kizFormat == "full" ? s.DataMatrix : s.Cis).ToList();
+        try { info.Add("Сохранён файл «" + f.WriteKiz(order.SourcePath, codes) + $"» ({codes.Count} кодов)"); }
+        catch (Exception ex) { info.Add("Не удалось сохранить файл КИЗ: " + ex.Message); }
+        try
+        {
+            var newPath = f.MarkCollected(order.SourcePath);
+            info.Add("Печатная форма переименована: «" + Path.GetFileName(newPath) + "»");
+            using var c = d.Open();
+            c.Execute("UPDATE Orders SET SourcePath=@p WHERE Id=@id", new { p = newPath, id });
+        }
+        catch (Exception ex) { info.Add("Не удалось переименовать печатную форму (открыта у кого-то?): " + ex.Message); }
+
+        var dialog = bx.ResolveDialog(order.SourcePath);
+        if (dialog != null)
+        {
+            var err = await bx.SendAsync(dialog, BitrixNotifier.BuildFboMessage(order.Instruction ?? order.OrderNumber, units, r.Boxes));
+            info.Add(err == null ? "Отбивка в Битрикс24 отправлена" : "Битрикс24: ошибка отправки — " + err);
+        }
+    }
+    else info.Add("Ордер загружен вручную — файл КИЗ и переименование не выполняются");
+    using (var c = d.Open())
+        c.Execute("UPDATE Orders SET FinishInfo=@i WHERE Id=@id", new { i = string.Join("\n", info), id });
+    return Results.Json(new { ok = true, units, boxes = r.Boxes, info });
 });
 
 app.MapPost("/api/orders/{id:long}/close", (long id, Db d) =>
 {
     using var c = d.Open();
-    c.Execute("UPDATE Orders SET Status='closed', ClosedAt=@n WHERE Id=@id", new { n = Now(), id });
-
-    // Отчёты генерируются один раз при закрытии и сохраняются в базе —
-    // кнопки скачивания будут работать повторно, без 404.
-    var order = c.QueryFirstOrDefault<Order>("SELECT * FROM Orders WHERE Id=@id", new { id });
-    var lines = c.Query<OrderLine>("SELECT * FROM OrderLines WHERE OrderId=@id ORDER BY LineNo", new { id }).ToList();
-    var scans = c.Query<ScannedItem>("SELECT * FROM ScannedItems WHERE OrderId=@id ORDER BY Id", new { id }).ToList();
-    var simpleCsv = BuildSimpleCsv(scans);
-    var fullCsv = BuildFullCsv(order, lines, scans);
-    c.Execute("INSERT INTO OrderReports(OrderId,SimpleCsv,FullCsv,CreatedAt) VALUES(@id,@s,@f,@n) " +
-              "ON CONFLICT(OrderId) DO UPDATE SET SimpleCsv=excluded.SimpleCsv, FullCsv=excluded.FullCsv, CreatedAt=excluded.CreatedAt",
-              new { id, s = simpleCsv, f = fullCsv, n = Now() });
-
+    CloseOrder(c, id);
     return Results.Ok(new { ok = true });
 });
 
@@ -152,8 +188,6 @@ app.MapGet("/api/orders/{id:long}/codes", (long id, Db d) =>
 app.MapPost("/api/scan", async (ScanRequest r, ScanProcessor p) =>
     Results.Json(await p.ProcessAsync(r.Code ?? "")));
 
-app.MapPost("/api/map", async (MapRequest r, ScanProcessor p) =>
-    Results.Json(await p.MapAndRescanAsync(r.Gtin, r.OrderLineId, r.Raw)));
 
 app.MapPost("/api/scans/{id:long}/setaside", (long id, Db d) =>
 {
@@ -169,72 +203,44 @@ app.MapDelete("/api/scans/{id:long}", (long id, Db d) =>
     return Results.Ok(new { ok = true });
 });
 
-// ---------------------------------------------------------------- Номенклатура
-app.MapGet("/api/products", (Db d, string q = null) =>
+// ---------------------------------------------------------------- База штрихкодов (отчёт по ШК из 1С)
+app.MapGet("/api/barcodes", (Db d, BarcodeSyncService sync, string q = null) =>
 {
     using var c = d.Open();
-    var sql = "SELECT * FROM Products" + (string.IsNullOrWhiteSpace(q)
-        ? "" : " WHERE Code1C LIKE @p OR Name LIKE @p OR Gtin LIKE @p") + " ORDER BY Name LIMIT 1000";
-    return Results.Json(c.Query<Product>(sql, new { p = "%" + q + "%" }));
-});
-
-app.MapPost("/api/products", (Product p, Db d) =>
-{
-    using var c = d.Open();
-    try
+    var sql = "SELECT * FROM Barcodes" + (string.IsNullOrWhiteSpace(q) ? "" :
+        " WHERE Gtin LIKE @p OR RawBarcode LIKE @p OR Code1C LIKE @p OR Name LIKE @p OR PrintName LIKE @p OR Article LIKE @p OR Characteristic LIKE @p")
+        + " ORDER BY Name, Characteristic LIMIT 500";
+    return Results.Json(new
     {
-        if (p.Id > 0)
-            c.Execute("UPDATE Products SET Code1C=@Code1C, Name=@Name, Gtin=@Gtin, Marked=@M WHERE Id=@Id",
-                new { p.Code1C, p.Name, p.Gtin, M = p.Marked ? 1 : 0, p.Id });
-        else
-            c.Execute("INSERT INTO Products(Code1C,Name,Gtin,Marked) VALUES(@Code1C,@Name,@Gtin,@M) " +
-                      "ON CONFLICT(Gtin) DO UPDATE SET Code1C=excluded.Code1C, Name=excluded.Name, Marked=excluded.Marked",
-                new { p.Code1C, p.Name, p.Gtin, M = p.Marked ? 1 : 0 });
-        return Results.Ok(new { ok = true });
-    }
-    catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
+        total = c.ExecuteScalar<int>("SELECT COUNT(*) FROM Barcodes"),
+        last = d.GetSetting("barcodes_last", ""),
+        rows = c.Query<BarcodeRow>(sql, new { p = "%" + q + "%" })
+    });
 });
 
-app.MapDelete("/api/products/{id:long}", (long id, Db d) =>
-{
-    using var c = d.Open();
-    c.Execute("DELETE FROM Products WHERE Id=@id", new { id });
-    return Results.Ok(new { ok = true });
-});
-
-// Импорт номенклатуры из XLSX по шаблону выгрузки 1С:
-// Штрихкод | Номенклатура.Код | Номенклатура.Наименование | Характеристика.Наименование
-app.MapPost("/api/products/import", async (HttpRequest req, Db d) =>
+app.MapPost("/api/barcodes/import", async (HttpRequest req, Db d) =>
 {
     var form = await req.ReadFormAsync();
     var file = form.Files.FirstOrDefault();
     if (file == null) return Results.BadRequest(new { error = "Файл не выбран" });
-    if (!file.FileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-        return Results.BadRequest(new { error = "Ожидается файл формата .xlsx" });
-
-    List<NomenclatureImportRow> rows;
-    List<string> warnings;
     try
     {
-        using var stream = file.OpenReadStream();
-        rows = NomenclatureImportParser.Parse(stream, out warnings);
+        using var ms = new MemoryStream();
+        await file.CopyToAsync(ms);
+        ms.Position = 0;
+        var rows = BarcodeImportParser.Parse(ms, out var warnings);
+        if (rows.Count == 0) return Results.BadRequest(new { error = "В файле нет строк со штрихкодами" });
+        BarcodeStore.Replace(d, rows);
+        d.SetSetting("barcodes_last", $"{DateTime.Now:dd.MM HH:mm} загружено вручную {rows.Count} ШК из «{file.FileName}»");
+        return Results.Json(new { imported = rows.Count, skipped = warnings.Count, warnings = warnings.Take(50) });
     }
-    catch (Exception ex)
-    {
-        return Results.BadRequest(new { error = "Не удалось разобрать файл: " + ex.Message });
-    }
+    catch (Exception ex) { return Results.BadRequest(new { error = "Не удалось разобрать файл: " + ex.Message }); }
+});
 
-    using var c = d.Open();
-    int n = 0;
-    foreach (var r in rows)
-    {
-        var gtin = r.Gtin.PadLeft(14, '0');
-        c.Execute("INSERT INTO Products(Code1C,Name,Gtin,Marked) VALUES(@c,@n,@g,1) " +
-                  "ON CONFLICT(Gtin) DO UPDATE SET Code1C=excluded.Code1C, Name=excluded.Name",
-            new { c = r.Code1C, n = r.Name, g = gtin });
-        n++;
-    }
-    return Results.Json(new { imported = n, skipped = warnings.Count, warnings });
+app.MapPost("/api/barcodes/sync", (BarcodeSyncService sync) =>
+{
+    try { return Results.Json(new { message = sync.SyncNow(true) }); }
+    catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
 });
 
 // ---------------------------------------------------------------- Журнал и статистика
@@ -362,14 +368,17 @@ app.MapGet("/api/settings", (Db d, ScannerService sc) =>
     if (all.TryGetValue("cz_token", out var t) && !string.IsNullOrEmpty(t))
         all["cz_token_masked"] = t.Length > 12 ? t.Substring(0, 6) + "…" + t.Substring(t.Length - 4) : "задан";
     all.Remove("cz_token");
+    all["bitrix_webhook_set"] = string.IsNullOrEmpty(all.GetValueOrDefault("bitrix_webhook")) ? "0" : "1";
+    all.Remove("bitrix_webhook");
     return Results.Json(new { settings = all, ports = ScannerService.AvailablePorts(), scanner = sc.State });
 });
 
-app.MapPost("/api/settings", (Dictionary<string, string> body, Db d, ScannerService sc) =>
+app.MapPost("/api/settings", (Dictionary<string, string> body, Db d, ScannerService sc, SecretProtector sp) =>
 {
     foreach (var kv in body)
     {
-        if (kv.Key == "cz_token" && string.IsNullOrWhiteSpace(kv.Value)) continue; // не стираем токен пустым значением
+        if ((kv.Key == "cz_token" || kv.Key == "bitrix_webhook") && string.IsNullOrWhiteSpace(kv.Value)) continue; // не стираем секрет пустым значением
+        if (kv.Key == "bitrix_webhook") { d.SetSetting(kv.Key, sp.Encrypt(kv.Value.Trim())); continue; }
         d.SetSetting(kv.Key, kv.Value);
     }
     sc.Reconnect();
@@ -381,6 +390,15 @@ app.MapPost("/api/cz/test", async (CzTestRequest r, TrueApiClient cz) =>
 {
     var res = await cz.CheckAsync(string.IsNullOrWhiteSpace(r.Cis) ? "0104600000000000212TESTCODE" : r.Cis);
     return Results.Json(new { ok = res.Ok, skipped = res.Skipped, message = res.Message, raw = res.Raw });
+});
+
+// Тестовое сообщение в Битрикс24
+app.MapPost("/api/bitrix/test", async (BitrixTestRequest r, BitrixNotifier bx) =>
+{
+    var dialog = string.IsNullOrWhiteSpace(r.DialogId) ? bx.Rules().Select(x => x.DialogId).FirstOrDefault() : r.DialogId.Trim();
+    if (dialog == null) return Results.Json(new { ok = false, message = "Не задано ни одного правила «папка = диалог»" });
+    var err = await bx.SendAsync(dialog, "Тест MarkCheck: связь с Битрикс24 работает");
+    return Results.Json(new { ok = err == null, message = err ?? $"Отправлено в {dialog}" });
 });
 
 // ---------------------------------------------------------------- Опасная зона: очистка базы
@@ -400,9 +418,44 @@ app.MapPost("/api/admin/clear-nomenclature", (Db d) =>
     var backupPath = Path.Combine(dataDir, $"delete-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.db");
     d.BackupTo(backupPath);
     using var c = d.Open();
-    c.Execute("DELETE FROM Products;");
+    c.Execute("DELETE FROM Products; DELETE FROM Barcodes;");
+    d.SetSetting("barcodes_stamp", "");
     return Results.Json(new { ok = true, backup = Path.GetFileName(backupPath) });
 });
+
+// Создаёт ордер из печатной формы и сопоставляет строки с базой ШК.
+object CreateOrder(Microsoft.Data.Sqlite.SqliteConnection c, Stream stream, string fileName, string sourcePath)
+{
+    var parsed = OrderParser.Parse(stream, out var warnings);
+    SkuResolver.Resolve(c, parsed.Lines, parsed.ByArticle);
+    var id = c.ExecuteScalar<long>(@"
+INSERT INTO Orders(OrderNumber,FileName,Recipient,Warehouse,CreatedAt,Status,DocumentJson,SourcePath,Instruction,ShipmentType)
+VALUES(@num,@file,@rec,@wh,@now,'active',@json,@src,@ins,'FBO'); SELECT last_insert_rowid();",
+        new
+        {
+            num = parsed.OrderNumber, file = fileName, rec = parsed.Recipient, wh = parsed.Warehouse,
+            now = Now(), json = JsonSerializer.Serialize(parsed), src = sourcePath, ins = parsed.Instruction
+        });
+    foreach (var l in parsed.Lines)
+        c.Execute(@"INSERT INTO OrderLines(OrderId,LineNo,Code1C,Article,Name,Qty,Unit,RequiresMarking,SkuKey,MatchStatus,MatchInfo)
+                    VALUES(@o,@LineNo,@Code1C,@Article,@Name,@Qty,@Unit,@rm,@SkuKey,@MatchStatus,@MatchInfo)",
+            new { o = id, l.LineNo, l.Code1C, l.Article, l.Name, l.Qty, l.Unit, rm = l.RequiresMarking ? 1 : 0, l.SkuKey, l.MatchStatus, l.MatchInfo });
+    int bad = parsed.Lines.Count(l => l.MatchStatus != "ok");
+    if (bad > 0) warnings.Insert(0, $"Не сопоставлено с базой ШК строк: {bad} — проверьте базу ШК (отмечены красным)");
+    return new { orderId = id, orderNumber = parsed.OrderNumber, lines = parsed.Lines.Count, warnings };
+}
+
+// Закрывает ордер и сохраняет отчёты в базе (кнопки скачивания работают повторно).
+void CloseOrder(Microsoft.Data.Sqlite.SqliteConnection c, long id)
+{
+    c.Execute("UPDATE Orders SET Status='closed', ClosedAt=COALESCE(ClosedAt,@n) WHERE Id=@id", new { n = Now(), id });
+    var order = c.QueryFirstOrDefault<Order>("SELECT * FROM Orders WHERE Id=@id", new { id });
+    var lines = c.Query<OrderLine>("SELECT * FROM OrderLines WHERE OrderId=@id ORDER BY LineNo", new { id }).ToList();
+    var scans = c.Query<ScannedItem>("SELECT * FROM ScannedItems WHERE OrderId=@id ORDER BY Id", new { id }).ToList();
+    c.Execute("INSERT INTO OrderReports(OrderId,SimpleCsv,FullCsv,CreatedAt) VALUES(@id,@s,@f,@n) " +
+              "ON CONFLICT(OrderId) DO UPDATE SET SimpleCsv=excluded.SimpleCsv, FullCsv=excluded.FullCsv, CreatedAt=excluded.CreatedAt",
+              new { id, s = BuildSimpleCsv(scans), f = BuildFullCsv(order, lines, scans), n = Now() });
+}
 
 Console.WriteLine();
 Console.WriteLine("=== Станция проверки кодов маркировки (MVP) ===");
@@ -415,7 +468,7 @@ app.Run();
 
 class LineCount { public long? OrderLineId { get; set; } public int Cnt { get; set; } }
 record ScanRequest(string Code);
-// OrderLineId — точный Id строки ордера, выбранной оператором в модалке вручного сопоставления —
-// такой выбор однозначен и не зависит от совпадения текста или кода 1С.
-record MapRequest(string Gtin, long OrderLineId, string Raw);
+record OpenRequest(string Path, bool Force);
+record FinishRequest(int Boxes);
+record BitrixTestRequest(string DialogId);
 record CzTestRequest(string Cis);

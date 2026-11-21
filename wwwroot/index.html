@@ -11,19 +11,33 @@
 <div id="navbar"></div>
 <div class="container-fluid">
 
-  <!-- Загрузка ордера -->
+  <!-- Выбор печатной формы из общей папки -->
   <div id="uploadPanel" class="card mb-3">
     <div class="card-body">
-      <h5 class="card-title">Загрузка расходного ордера</h5>
-      <div class="row g-2 align-items-center">
-        <div class="col-md-6">
-          <input type="file" id="orderFile" class="form-control" accept=".xlsx,.xls">
-        </div>
-        <div class="col-auto">
-          <button id="btnUpload" class="btn btn-primary">Загрузить и начать проверку</button>
-        </div>
-        <div class="col-auto"><span id="uploadMsg" class="text-muted"></span></div>
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <h5 class="card-title mb-0 me-3">Расходные ордера для сборки (ФБО)</h5>
+        <input id="fileSearch" class="form-control form-control-sm" style="max-width:320px" placeholder="Поиск по имени или папке">
+        <div class="form-check form-switch ms-2">
+          <input class="form-check-input" type="checkbox" id="showCollected">
+          <label class="form-check-label small" for="showCollected">Показывать собранные</label></div>
+        <button class="btn btn-sm btn-outline-secondary" id="btnRefresh">Обновить</button>
+        <span class="small text-muted ms-auto" id="rootInfo"></span>
       </div>
+      <div id="filesMsg" class="small text-danger"></div>
+      <div class="files-list border rounded">
+        <table class="table table-sm table-hover mb-0">
+          <thead class="table-light"><tr><th>Файл</th><th>Папка</th><th>Изменён</th><th></th></tr></thead>
+          <tbody id="filesBody"></tbody>
+        </table>
+      </div>
+      <details class="mt-2">
+        <summary class="small text-muted">Загрузить файл вручную (без папки: файл КИЗ и отбивка не формируются)</summary>
+        <div class="row g-2 align-items-center mt-1">
+          <div class="col-md-6"><input type="file" id="orderFile" class="form-control form-control-sm" accept=".xlsx"></div>
+          <div class="col-auto"><button id="btnUpload" class="btn btn-sm btn-outline-primary">Загрузить и начать</button></div>
+        </div>
+      </details>
+      <div id="uploadMsg" class="small mt-2"></div>
     </div>
   </div>
 
@@ -34,18 +48,20 @@
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0">Ордер <span id="orderNum" class="text-primary"></span>
             <small class="text-muted" id="orderMeta"></small></h5>
+          <div class="small text-muted" id="orderInstr"></div>
           <div>
-            <button id="btnCsv" class="btn btn-success btn-sm">Завершить проверку</button>
-            <button id="btnCancel" class="btn btn-outline-danger btn-sm">Закрыть ордер</button>
+            <button id="btnCsv" class="btn btn-success btn-sm">Завершить сборку</button>
+            <button id="btnCancel" class="btn btn-outline-danger btn-sm" title="Закрыть без файла КИЗ и без отметки «СОБРАН»">Прервать</button>
           </div>
         </div>
         <table class="table table-sm table-bordered order-table align-middle">
           <thead class="table-light">
-            <tr><th>№</th><th>Код 1С</th><th>Товар</th><th class="text-center">План</th>
-                <th class="text-center">Проверено</th><th class="text-center">М</th></tr>
+            <tr><th>№</th><th>Код / артикул</th><th>Товар</th><th class="text-center">План</th>
+                <th class="text-center">Проверено</th><th class="text-center">М</th><th title="Сопоставление с базой ШК">ШК</th></tr>
           </thead>
           <tbody id="linesBody"></tbody>
         </table>
+        <div id="matchWarn" class="alert alert-danger py-1 small d-none"></div>
         <div id="progressText" class="text-muted small"></div>
       </div>
 
@@ -70,41 +86,39 @@
   </div>
 </div>
 
-<!-- Модальное окно с кодами маркировки после завершения -->
-<div class="modal fade" id="codesModal" tabindex="-1" data-bs-backdrop="static">
-  <div class="modal-dialog modal-lg">
+<!-- Завершение сборки: количество коробов -->
+<div class="modal fade" id="boxesModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog">
     <div class="modal-content">
-      <div class="modal-header bg-success text-white">
-        <h5 class="modal-title">Проверка завершена</h5>
-      </div>
+      <div class="modal-header"><h5 class="modal-title">Завершение сборки</h5></div>
       <div class="modal-body">
-        <p class="mb-1">Коды маркировки для вставки в 1С (<span id="codesCount">0</span> шт.):</p>
-        <textarea id="codesArea" class="form-control mono" rows="10" readonly></textarea>
+        <div id="boxesWarn" class="alert alert-warning py-1 small d-none"></div>
+        <p class="mb-1">Собрано единиц: <strong id="boxesUnits"></strong></p>
+        <label class="form-label">Сколько получилось коробов?</label>
+        <input type="number" min="1" step="1" id="boxesInput" class="form-control form-control-lg">
       </div>
       <div class="modal-footer">
-        <button class="btn btn-success" id="btnCopyCodes">Скопировать в буфер</button>
-        <a class="btn btn-outline-secondary" id="linkCsvCodes" href="#">Скачать CSV</a>
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn btn-success" id="btnFinish">Завершить</button>
       </div>
     </div>
   </div>
 </div>
 
-<!-- Модальное окно сопоставления GTIN -->
-<div class="modal fade" id="mapModal" tabindex="-1" data-bs-backdrop="static">
+<!-- Итог сборки -->
+<div class="modal fade" id="codesModal" tabindex="-1" data-bs-backdrop="static">
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
-      <div class="modal-header bg-warning">
-        <h5 class="modal-title">Сопоставление нового GTIN</h5>
-      </div>
+      <div class="modal-header bg-success text-white"><h5 class="modal-title">Сборка завершена</h5></div>
       <div class="modal-body">
-        <p>GTIN <strong id="mapGtin" class="mono"></strong> не найден в справочнике номенклатуры.
-           Выберите товар из текущего ордера — связка сохранится в базе.</p>
-        <div id="mapList" class="list-group"></div>
+        <ul id="finishInfo" class="small"></ul>
+        <p class="mb-1">Коды маркировки (<span id="codesCount">0</span> шт.):</p>
+        <textarea id="codesArea" class="form-control mono" rows="8" readonly></textarea>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-outline-danger" id="btnMapAside">Это лишний товар — отложить</button>
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn btn-outline-success" id="btnCopyCodes">Скопировать в буфер</button>
+        <a class="btn btn-outline-secondary" id="linkCsvCodes" href="#">Скачать CSV</a>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
       </div>
     </div>
   </div>
