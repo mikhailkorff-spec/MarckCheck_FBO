@@ -85,7 +85,13 @@ function handleResult(res) {
 // --- Список печатных форм в общей папке ---
 async function loadFiles() {
     const all = document.getElementById('showCollected').checked ? 1 : 0;
-    const d = await apiGet('/api/files?all=' + all);
+    let d;
+    try { d = await apiGet('/api/files?all=' + all); }
+    catch (e) {
+        // Не оставляем пустой список молча — показываем причину.
+        document.getElementById('filesMsg').textContent = 'Не удалось получить список файлов: ' + e.message;
+        return;
+    }
     files = d.files || [];
     document.getElementById('rootInfo').textContent = d.root ? 'Папка: ' + d.root : '';
     document.getElementById('filesMsg').textContent = d.error || '';

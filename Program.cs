@@ -102,9 +102,11 @@ app.MapPost("/api/orders/upload", async (HttpRequest req, Db d) =>
 });
 
 // ---------------------------------------------------------------- Печатные формы в общей папке
-app.MapGet("/api/files", (OrderFolderService f, bool all = false) =>
+// all: «1»/«true» — показывать и собранные. Строкой, т.к. bool в minimal API не принимает «0»/«1» (ответ 400).
+app.MapGet("/api/files", (OrderFolderService f, string all = null) =>
 {
-    var files = f.List(all, out var error);
+    bool includeCollected = all == "1" || string.Equals(all, "true", StringComparison.OrdinalIgnoreCase);
+    var files = f.List(includeCollected, out var error);
     return Results.Json(new { root = f.Root, error, files });
 });
 
